@@ -4,7 +4,7 @@ class Mo_variables_ext
 {
 	public $settings = array();
 	public $name = 'Mo\' Variables';
-	public $version = '1.1.0';
+	public $version = '1.1.5';
 	public $description = 'Adds many useful global variables and conditionals to use in your templates.';
 	public $settings_exist = 'y';
 	public $docs_url = 'https://git.io/mo';
@@ -13,17 +13,33 @@ class Mo_variables_ext
 		'ajax',
 		'secure',
 		'get',
+		'defaults_get',
 		'get_post',
+		'defaults_get_post',
 		'post',
+		'defaults_post',
 		'cookie',
+		'defaults_cookie',
+		'flashdata',
+		'defaults_flashdata',
 		'page_tracker',
 		'reverse_segments',
 		'segments_from',
 		'paginated',
 		'archive',
+		'categorized',
+		'reserved_category_word',
 		'current_url',
 		'member_variables',
 		'member_group_conditionals',
+		'member_id_conditionals',
+	);
+
+	//only these methods will be run more than once,
+	//eg. in embedded templates
+	protected $run_multiple = array(
+		'member_group_conditionals',
+		'member_id_conditionals',
 	);
 	
 	protected $template_data = '';
@@ -38,15 +54,11 @@ class Mo_variables_ext
 	public function activate_extension()
 	{
 		//get all the default settings as enabled
-		if (function_exists('array_fill_keys'))
+		$settings = array();
+		
+		foreach ($this->defaults as $key)
 		{
-			$settings = array_fill_keys($this->defaults, '1');
-		}
-		else
-		{
-			$settings = array();
-			
-			foreach ($this->defaults as $key)
+			if (strncmp($key, 'defaults_', 8) !== 0)
 			{
 				$settings[$key] = '1';
 			}
@@ -139,19 +151,36 @@ class Mo_variables_ext
 	public function settings()
 	{
 		$setting = array('r', array('1' => 'yes', '0' => 'no'), '0');
+		$defaults_setting = array('t', array('rows' => 5), '');
 		
-		if (function_exists('array_fill_keys'))
-		{
-			$settings = array_fill_keys($this->defaults, $setting);
-		}
-		else
-		{
-			$settings = array();
+		$settings = array();
 			
-			foreach ($this->defaults as $key)
-			{
-				$settings[$key] = $setting;
-			}
+		foreach ($this->defaults as $key)
+		{
+			// defaults settings get a textarea
+			$settings[$key] = strncmp($key, 'defaults_', 9) === 0 ? $defaults_setting : $setting;
+		}
+
+		// hide the defaults fields for get/get_post/post/cookie/flashdata if not being used
+		if ($this->EE->input->get('C') === 'addons_extensions' && $this->EE->input->get('M') === 'extension_settings')
+		{
+			$this->EE->load->library('javascript');
+
+			$this->EE->javascript->output('
+				$.each(["get", "get_post", "post", "cookie", "flashdata"], function(i, v) {
+					var $input = $("input[name="+v+"]"),
+							setting = $input.filter(":checked").val(),
+							$defaultsRow = $("#defaults_"+v).parents("tr");
+
+					if (setting === "0") {
+						$defaultsRow.hide();
+					}
+
+					$input.change(function() {
+						$defaultsRow.toggle($(this).val() === "1");
+					});
+				});
+			');
 		}
 		
 		return $settings;
@@ -168,8 +197,15 @@ class Mo_variables_ext
 		{
 			return;
 		}
+
+		$this->uri_string = isset($this->EE->config->_global_vars['freebie_original_uri'])
+			? $this->EE->config->_global_vars['freebie_original_uri']
+			: $this->EE->uri->uri_string();
 		
 		$this->template_data = $row['template_data'];
+
+		//parse snippets, too
+		$this->template_data = implode("\n", $this->EE->config->_global_vars);
 		
 		//remove settings that are zero and then loop through
 		//the remaining settings
@@ -179,6 +215,14 @@ class Mo_variables_ext
 		{
 			if (method_exists($this, $method))
 			{
+				if ($this->EE->session->cache(__CLASS__, $method) && ! in_array($method, $this->run_multiple))
+				{
+					//don't run this method on subsequent runs
+					continue;
+				}
+				
+				$this->EE->session->set_cache(__CLASS__, $method, TRUE);
+				
 				$this->{$method}();
 			}
 		}
@@ -205,7 +249,7 @@ class Mo_variables_ext
 			$final_template = $this->EE->extensions->last_call;
 		}
 		
-		if (preg_match_all('/{(get|post|get_post|cookie):(.*?)}/', $final_template, $matches))
+		if (preg_match_all('/{(get|post|get_post|cookie|flashdata):(.*?)}/', $final_template, $matches))
 		{
 			foreach ($matches[0] as $destroy)
 			{
@@ -232,6 +276,22 @@ class Mo_variables_ext
 	{
 		if (is_array($key))
 		{
+			// set default values for this array if defaults exist in the settings;
+			if ( ! empty($this->settings['defaults_'.$value]))
+			{
+				$defaults = preg_split('/[\r\n]+/', $this->settings['defaults_'.$value]);
+
+				foreach ($defaults as $default)
+				{
+					$default = preg_split('/\s*:\s*/', $default);
+
+					if ( ! isset($key[$default[0]]))
+					{
+						$key[$default[0]] = isset($default[1]) ? $default[1] : '';
+					}
+				}
+			}
+
 			foreach ($key as $_key => $_value)
 			{
 				$this->set_global_var($_key, $_value, $xss_clean, $embed, $separator, $value);//we use the second param, $value, as the prefix in the case of an array
@@ -304,6 +364,17 @@ class Mo_variables_ext
 	
 	
 	/**
+	 * Set variables from the $this->EE->session->flashdata array
+	 * 
+	 * @return void
+	 */
+	protected function flashdata()
+	{
+		$this->set_global_var($this->EE->session->flashdata, 'flashdata', TRUE, TRUE);
+	}
+	
+	
+	/**
 	 * Set the {if paginated}, {if not_paginated} and {page_offset variables}
 	 * 
 	 * @return void
@@ -313,7 +384,7 @@ class Mo_variables_ext
 		$this->EE->load->helper('url');
 		
 		//fix for structure/freebie and other addons that manipulate Uri::uri_string()
-		$uri_string = $this->EE->input->server('PATH_INFO') !== FALSE ? $this->EE->input->server('PATH_INFO') : '/'.$this->EE->uri->uri_string();
+		$uri_string = $this->EE->input->server('PATH_INFO') !== FALSE ? $this->EE->input->server('PATH_INFO') : '/'.$this->uri_string;
 		
 		if (preg_match('#/P(\d+)/?$#', $uri_string, $match))
 		{
@@ -322,8 +393,10 @@ class Mo_variables_ext
 			$this->set_global_var('not_paginated', FALSE);
 			
 			$this->set_global_var('page_offset', $match[1]);
+            
+			$this->set_global_var('pagination_base_uri', substr($uri_string, 0, -strlen($match[0])));
 			
-			$this->set_global_var('pagination_base_url', substr(current_url(), 0, -strlen($match[0])));
+			$this->set_global_var('pagination_base_url', substr($this->EE->functions->create_url($uri_string), 0, -strlen($match[0])));
 		}
 		else
 		{
@@ -332,13 +405,31 @@ class Mo_variables_ext
 			$this->set_global_var('not_paginated', TRUE);
 			
 			$this->set_global_var('page_offset', 0);
+            
+			$this->set_global_var('pagination_base_uri', $uri_string);
 			
-			$this->set_global_var('pagination_base_url', current_url());
+			$this->set_global_var('pagination_base_url', $this->EE->functions->create_url($uri_string));
 		}
 	}
 	
 	/**
-	 * Set the {current_url} and {uri_string} variables
+	 * Set the {if categorized} conditional
+	 */
+	protected function categorized()
+	{
+		$this->set_global_var('categorized', in_array($this->EE->config->item('reserved_category_word'), $this->EE->uri->segment_array()));
+	}
+
+	/**
+	 * Set the {reserved_category_word} variable
+	 */
+	protected function reserved_category_word()
+	{
+		$this->set_global_var('reserved_category_word', $this->EE->config->item('reserved_category_word'));
+	}
+	
+	/**
+	 * Set the {current_url}, {uri_string} and {query_string} variables
 	 * 
 	 * @return void
 	 */
@@ -348,7 +439,28 @@ class Mo_variables_ext
 		
 		$this->set_global_var('current_url', current_url());
 		
+		$this->set_global_var('current_url_encoded', urlencode(current_url()));
+		
 		$this->set_global_var('uri_string', $this->EE->uri->uri_string());
+		
+		$this->set_global_var('uri_string_encoded', urlencode($this->EE->uri->uri_string()));
+
+		if (isset($_SERVER['QUERY_STRING']))
+		{
+			$this->set_global_var('query_string', $_SERVER['QUERY_STRING']);
+		}
+		else if (isset($_SERVER['REQUEST_URI']) && FALSE !== ($pos = strpos($_SERVER['REQUEST_URI'], '?')))
+		{
+			$this->set_global_var('query_string', substr($_SERVER['REQUEST_URI'], $pos + 1));
+		}
+		else if ($_GET)
+		{
+			$this->set_global_var('query_string', http_build_query($_GET));
+		}
+		else
+		{
+			$this->set_global_var('query_string', '');
+		}
 	}
 	
 	/**
@@ -364,19 +476,21 @@ class Mo_variables_ext
 	}
 	
 	/**
-	 * Set the {if secure}, {if not_secure} and {secure_site_url} variables
+	 * Set the {if secure}, {if not_secure}, {insecure_site_url}, {secure_site_url} variables
 	 * 
 	 * @return void
 	 */
 	protected function secure()
 	{
-		$secure = isset($_SERVER['HTTPS']) && strtolower($_SERVER['HTTPS']) !== 'off';
+		$secure = !empty($_SERVER['HTTPS']);
 		
 		$this->set_global_var('secure', $secure);
-		
+
 		$this->set_global_var('not_secure', ! $secure);
-		
-		$this->set_global_var('secure_site_url', str_replace('http://', 'https://', $this->EE->config->item('site_url')));
+
+		$this->set_global_var('secure_site_url', preg_replace("/^http[s]?:/", "https:", $this->EE->config->item('site_url')));
+
+		$this->set_global_var('insecure_site_url', preg_replace("/^http[s]?:/", "http:", $this->EE->config->item('site_url')));
 	}
 	
 	/**
@@ -399,21 +513,21 @@ class Mo_variables_ext
 			'not_yearly_archive' => TRUE,
 		);
 		
-		if (preg_match('#/\d{4}/\d{2}/\d{2}/?$#', $this->EE->uri->uri_string()))
+		if (preg_match('#/\d{4}/\d{2}/\d{2}(/P\d+)?/?$#', $this->uri_string))
 		{
 			$archive['archive'] = TRUE;
 			$archive['daily_archive'] = TRUE;
 			$archive['not_archive'] = FALSE;
 			$archive['not_daily_archive'] = FALSE;
 		}
-		else if (preg_match('#/\d{4}/\d{2}/?$#', $this->EE->uri->uri_string()))
+		else if (preg_match('#/\d{4}/\d{2}(/P\d+)?/?$#', $this->uri_string))
 		{
 			$archive['archive'] = TRUE;
 			$archive['monthly_archive'] = TRUE;
 			$archive['not_archive'] = FALSE;
 			$archive['not_monthly_archive'] = FALSE;
 		}
-		else if (preg_match('#/\d{4}/?$#', $this->EE->uri->uri_string()))
+		else if (preg_match('#/\d{4}(/P\d+)?/?$#', $this->uri_string))
 		{
 			$archive['archive'] = TRUE;
 			$archive['yearly_archive'] = TRUE;
@@ -563,6 +677,51 @@ class Mo_variables_ext
 				else
 				{
 					$this->set_global_var($key, $in_group);
+				}
+			}
+		}
+	}
+	
+	/**
+	 * Set the {if has_member_id(1|2|3)} and {if not_has_member_id(1|2|3)} early-parsed conditionals
+	 * 
+	 * @return void
+	 */
+	protected function member_id_conditionals()
+	{
+		if (preg_match_all('/(not_)?has_member_id\(([\042\047]?)(.*?)\\2\)/', $this->template_data, $matches))
+		{
+			foreach ($matches[3] as $i => $member_ids)
+			{
+				$full_match = $matches[0][$i];
+
+				//so you can use pipe-delimited 1|2|3 global variables
+				if (strpos($member_ids, '{') !== FALSE)
+				{
+					foreach ($this->EE->config->_global_vars as $key => $value)
+					{
+						if (strpos($member_ids, '{'.$key.'}') !== FALSE)
+						{
+							$member_ids = str_replace('{'.$key.'}', $this->EE->config->_global_vars[$key], $member_ids);
+							$full_match = str_replace('{'.$key.'}', $this->EE->config->_global_vars[$key], $full_match);
+						}
+					}
+				}
+				
+				$has_member_id = in_array($this->EE->session->userdata('member_id'), explode('|', $member_ids));
+				
+				$not = $matches[1][$i];
+				
+				// sigh
+				$key = str_replace('|', '\|', $full_match);
+				
+				if ($not)
+				{
+					$this->set_global_var($key, ! $has_member_id);
+				}
+				else
+				{
+					$this->set_global_var($key, $has_member_id);
 				}
 			}
 		}
